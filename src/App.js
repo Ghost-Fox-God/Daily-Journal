@@ -3,9 +3,8 @@ import { v4 as uuidv4 } from "uuid";
 import Modal from "react-modal";
 import Note from "./components/Note";
 import NoteList from "./components/NoteList";
-import NotePopup from "./components/NotePopup"; // Import the NotePopup component
+import NotePopup from "./components/NotePopup";
 import axios from "axios";
-import REACT_APP_API from "./Constants";
 
 Modal.setAppElement("#root");
 
@@ -32,7 +31,7 @@ const App = () => {
 
 	const handleDeleteNote = async (id) => {
 		try {
-			const response = await axios.delete(REACT_APP_API, { data: { id: id } });
+			const response = await axios.delete(process.env.REACT_APP_API, { data: { id: id } });
 			const updatedNotes = notes.filter((note) => note.id !== id);
 			setNotes(updatedNotes);
 		} catch (err) {
@@ -52,7 +51,7 @@ const App = () => {
 	useEffect(() => {
 		const fetchData = async () => {
 			try {
-				const response = await axios.get(REACT_APP_API);
+				const response = await axios.get(process.env.REACT_APP_API);
 				const data = JSON.parse(response.data.body);
 				setNotes(data);
 			} catch (err) {

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import axios from "axios";
-import REACT_APP_API from "../Constants";
 
 const Note = ({ onAddNote, editNote, onEditNote, setEditNote }) => {
 	const [title, setTitle] = useState("");
@@ -17,14 +16,14 @@ const Note = ({ onAddNote, editNote, onEditNote, setEditNote }) => {
 		if (title && note) {
 			if (editNote) {
 				try {
-					const response = await axios.put(REACT_APP_API, { id: editNote.id, title, note });
+					const response = await axios.put(process.env.REACT_APP_API, { id: editNote.id, title, note });
 					onEditNote({ id: editNote.id, title, note });
 				} catch (err) {
 					console.log("There is an error in editing Notes", err);
 				}
 			} else {
 				try {
-					const response = await axios.post(REACT_APP_API, { title, note });
+					const response = await axios.post(process.env.REACT_APP_API, { title, note });
 					onAddNote({ title, note });
 				} catch (err) {
 					console.log("There is an error in Saving the Note", err);
