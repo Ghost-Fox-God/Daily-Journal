@@ -1,0 +1,519 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloud Computing Term Project
+
+Resources:
+  DynamoDBNotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "notes"
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  SNSEmailTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: EmailTopic
+      DisplayName: Notes
+
+  SNSEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SNSEmailTopic
+      Endpoint: nehahib816@kkoup.com
+
+  SQSEmailQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: EmailQueue
+
+  LambdaFunctionSendEmail:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SendEmail
+      Handler: index.lambda_handler
+      Runtime: python3.10
+      Timeout: 60
+      Role: arn:aws:iam::480835978871:role/LabRole
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SNSEmailTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              sns = boto3.client('sns')
+              for record in event['Records']:
+                  body = record['body']
+                  messageAttributes = record['messageAttributes']
+                  response = sns.publish(
+                      TopicArn=os.environ['SNS_TOPIC_ARN'],
+                      Message= body,
+                      Subject=messageAttributes["Subject"]["stringValue"],
+                      MessageStructure='string'
+                  )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(event)
+              }
+
+  # EventSourceMappingSQSEmailQueueAndLambdaFunctionSendEmail:
+  #   Type: "AWS::Lambda::EventSourceMapping"
+  #   Properties:
+  #     BatchSize: 10
+  #     Enabled: true
+  #     EventSourceArn: !GetAtt SQSEmailQueue.Arn
+  #     FunctionName: !GetAtt LambdaFunctionSendEmail.Arn
+
+  LambdaFunctionGetNotes:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: getNotes
+      Handler: index.lambda_handler
+      Runtime: python3.10
+      Timeout: 60
+      Role: arn:aws:iam::480835978871:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from boto3.dynamodb.conditions import Attr
+
+          dynamodb = boto3.resource("dynamodb")
+
+          def lambda_handler(event, context):
+              table = dynamodb.Table("notes")
+              response = table.scan()
+              items = response['Items']
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(items)
+              }
+
+  LambdaFunctionCreateNote:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: createNote
+      Handler: index.lambda_handler
+      Runtime: python3.10
+      Timeout: 60
+      Role: arn:aws:iam::480835978871:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import datetime
+          import random
+          import string
+          import boto3
+
+          dynamodb = boto3.resource("dynamodb")
+          sqsclient = boto3.client("sqs")
+
+          def lambda_handler(event, context):
+              queueUrl = sqsclient.get_queue_url(QueueName='EmailQueue')['QueueUrl']
+              # data = json.loads(event['body'])
+              title = event.get('title')
+              note = event.get('note')
+
+              table = dynamodb.Table("notes")
+              response = table.put_item(
+                  Item={"id": generate_unique_string(), "title": title, "note": note})
+              sqsresponse = sqsclient.send_message(
+                  QueueUrl=queueUrl,
+                  MessageBody=f'Hi Akshay,\n\nA new note has been created by you.\n\nContent of the notes are\n{note}',
+                  DelaySeconds=0,
+                  MessageAttributes={
+                      'Subject': {
+                      'DataType': 'String',
+                      'StringValue': 'Note Created'
+                      },
+                  }
+              )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({"response":response,"sqsresponse":sqsresponse})
+              }
+
+          def generate_unique_string():
+              current_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+              random_suffix = ''.join(random.choices(
+                  string.ascii_lowercase + string.digits, k=8))
+              unique_string = f"{current_time}_{random_suffix}"
+              return unique_string
+
+  LambdaFunctionDeleteNote:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: deleteNote
+      Handler: index.lambda_handler
+      Runtime: python3.10
+      Timeout: 60
+      Role: arn:aws:iam::480835978871:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from boto3.dynamodb.conditions import Key
+
+          def lambda_handler(event, context):
+              dynamodb = boto3.resource("dynamodb")
+              sqsclient = boto3.client("sqs")
+              queueUrl = sqsclient.get_queue_url(QueueName='EmailQueue')['QueueUrl']
+              # data = json.loads(event['body'])
+              note_id = event.get("id")
+
+              table = dynamodb.Table("notes")
+              response = table.delete_item(
+                  Key={
+                      'id': note_id,
+                  }
+              )
+              sqsresponse = sqsclient.send_message(
+                  QueueUrl=queueUrl,
+                  MessageBody=f'Hi Akshay,\n\nA note with {note_id} id has been deleted.',
+                  DelaySeconds=0,
+                  MessageAttributes={
+                      'Subject': {
+                      'DataType': 'String',
+                      'StringValue': 'Note Deleted'
+                      },
+                  }
+              )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(response)
+              }
+
+  LambdaFunctionUpdateNote:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: updateNote
+      Handler: index.lambda_handler
+      Runtime: python3.10
+      Timeout: 60
+      Role: arn:aws:iam::480835978871:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from boto3.dynamodb.conditions import Attr
+
+          dynamodb = boto3.resource("dynamodb")
+          sqsclient = boto3.client("sqs")
+
+          def lambda_handler(event, context):
+              # data = json.loads(event['body'])
+              note_id = event.get("id")
+              updatednote = event.get("note")
+              updatedtitle = event.get("title")
+              queueUrl = sqsclient.get_queue_url(QueueName='EmailQueue')['QueueUrl']
+              table = dynamodb.Table("notes")
+              response = table.update_item(
+                  Key={
+                      'id': note_id,
+                  },
+                  UpdateExpression='SET note = :val1, title = :val2',
+                  ExpressionAttributeValues={
+                      ':val1': updatednote,
+                      ':val2': updatedtitle
+                  }
+              )
+              sqsresponse = sqsclient.send_message(
+                  QueueUrl=queueUrl,
+                  MessageBody=f'Hi Akshay,\n\nA note with {updatedtitle} title has been Updated.',
+                  DelaySeconds=0,
+                  MessageAttributes={
+                      'Subject': {
+                      'DataType': 'String',
+                      'StringValue': 'Note Updated'
+                      },
+                  }
+              )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(response)
+              }
+
+  ApiGatewayRestApi:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name: "notes"
+      Description: "notes api gateway"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  NoteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: "note"
+
+  GivingApiGateWayPermissionToAccessLambdaFunctionGetNotes:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaFunctionGetNotes.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+
+  GivingApiGateWayPermissionToAccessLambdaFunctionCreateNote:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaFunctionCreateNote.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+
+  GivingApiGateWayPermissionToAccessLambdaFunctionDeleteNote:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaFunctionDeleteNote.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+
+  GivingApiGateWayPermissionToAccessLambdaFunctionUpdateNote:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaFunctionUpdateNote.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+
+  ApiMethodOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref NoteResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+            ResponseTemplates:
+              "application/json": ""
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  ApiMethodPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref NoteResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: "AWS"
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionCreateNote.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+          StatusCode: "200"
+
+  ApiMethodGet:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      HttpMethod: "GET"
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref NoteResource
+      AuthorizationType: "NONE"
+      Integration:
+        Type: "AWS"
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionGetNotes.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+          StatusCode: "200"
+
+  ApiMethodPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref NoteResource
+      HttpMethod: PUT
+      AuthorizationType: NONE
+      Integration:
+        Type: "AWS"
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionUpdateNote.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+          StatusCode: "200"
+
+  ApiMethodDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref NoteResource
+      HttpMethod: DELETE
+      AuthorizationType: NONE
+      Integration:
+        Type: "AWS"
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionDeleteNote.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+          StatusCode: "200"
+
+  ApiGateWayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn: ApiMethodDelete
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGateWayDeployment
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      DeploymentId: !Ref ApiGateWayDeployment
+      StageName: prod
+      Description: Production Stage
+
+  EC2InstancePortSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Enable port 3000 for react app
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+
+  EC2InstanceSSHSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Enable port 22 for ssh
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  EC2InstanceHttpSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Enable Http access via port 80
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-06e46074ae430fba6
+      InstanceType: t2.small
+      KeyName: akshay
+      SecurityGroupIds:
+        - !Ref EC2InstancePortSecurityGroup
+        - !Ref EC2InstanceSSHSecurityGroup
+        - !Ref EC2InstanceHttpSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: CloudComputingTerm
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo su
+          yum install git -y
+          git clone https://github.com/Ghost-Fox-God/cloud-computing-term-project.git
+          cd cloud-computing-term-project/
+          rm .env
+          echo "REACT_APP_API=\"https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/note\"" > .env
+          yum install nodejs -y
+          yum install npm -y
+          npm install
+          npm run start&
+
+Outputs:
+  WebUri:
+    Description: Server is running on this url
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt
+          - EC2Instance
+          - PublicDnsName
+        - ":3000"
